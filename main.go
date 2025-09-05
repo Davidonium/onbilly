@@ -40,39 +40,19 @@ func run(_ []string) error {
 	s := bufio.NewScanner(fd)
 	// 256 MiB buffer
 	buf := make([]byte, 256*1024*1024)
-	s.Buffer(buf, 1024)
+	s.Buffer(buf, 256*1024*1024)
 
-	measurements := make(map[uint64]*Station, 1024)
+	measurements := make(map[uint64]*Station, 512)
 
 	i := 0
 	for s.Scan() {
 		l := s.Bytes()
-		sep := bytes.IndexByte(l, ';')
+		sepidx := bytes.IndexByte(l, ';')
 
-		station := l[:sep]
-		rawMeasure := l[sep+1:]
+		station := l[:sepidx]
+		rawMeasure := l[sepidx+1:]
 
-		b := rawMeasure
-		var sign int32 = 1
-		if len(b) > 0 && b[0] == '-' {
-			sign = -1
-
-			b = b[1:]
-		}
-
-		var measure int32 = 0
-		var power uint32 = 0
-		for i := int32(len(b) - 1); i >= 0; i-- {
-			b := b[i]
-			// avoid '.'
-			if b >= '0' && b <= '9' {
-				// subtracting the ascii value of 0 to any digit transforms it to its value
-				measure += int32(b - '0') * int32(tenToThePowerOf(power))
-				power++
-			}
-		}
-
-		measure *= sign
+		measure := fastFloatParse(rawMeasure)
 
 		h := hash(station)
 		s, ok := measurements[h]
@@ -81,7 +61,7 @@ func run(_ []string) error {
 			copy(stationCopy, station)
 			s = &Station{
 				Name:     stationCopy,
-				Measures: make([]int32, 0, 20 * 1024),
+				Measures: make([]int32, 0, 20*1024),
 				Max:      measure,
 				Min:      measure,
 				Sum:      measure,
@@ -159,7 +139,7 @@ func fastFloatParse(b []byte) int32 {
 	for i := int32(len(b) - 1); i >= 0; i-- {
 		b := b[i]
 		if b >= '0' && b <= '9' {
-			measure += (int32(b) - int32('0')) * int32(tenToThePowerOf(power))
+			measure += int32(b-'0') * int32(tenToThePowerOf(power))
 			power++
 		}
 	}
