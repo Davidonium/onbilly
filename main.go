@@ -8,7 +8,6 @@ import (
 	"os"
 	"runtime/pprof"
 	"slices"
-	"strings"
 )
 
 func main() {
@@ -39,31 +38,55 @@ func run(_ []string) error {
 	defer fd.Close()
 
 	s := bufio.NewScanner(fd)
+	// 256 MiB buffer
 	buf := make([]byte, 256*1024*1024)
 	s.Buffer(buf, 1024)
 
-	measurements := make(map[string]*Station, 1024)
+	measurements := make(map[uint64]*Station, 1024)
 
 	i := 0
 	for s.Scan() {
 		l := s.Bytes()
 		sep := bytes.IndexByte(l, ';')
 
-		station := string(l[:sep])
+		station := l[:sep]
 		rawMeasure := l[sep+1:]
 
-		measure := fastFloatParse(rawMeasure)
+		b := rawMeasure
+		var sign int32 = 1
+		if len(b) > 0 && b[0] == '-' {
+			sign = -1
 
-		s, ok := measurements[station]
+			b = b[1:]
+		}
+
+		var measure int32 = 0
+		var power uint32 = 0
+		for i := int32(len(b) - 1); i >= 0; i-- {
+			b := b[i]
+			// avoid '.'
+			if b >= '0' && b <= '9' {
+				// subtracting the ascii value of 0 to any digit transforms it to its value
+				measure += int32(b - '0') * int32(tenToThePowerOf(power))
+				power++
+			}
+		}
+
+		measure *= sign
+
+		h := hash(station)
+		s, ok := measurements[h]
 		if !ok {
+			stationCopy := make([]byte, len(station))
+			copy(stationCopy, station)
 			s = &Station{
-				Name:     station,
-				Measures: make([]int32, 0, 8192),
+				Name:     stationCopy,
+				Measures: make([]int32, 0, 20 * 1024),
 				Max:      measure,
 				Min:      measure,
 				Sum:      measure,
 			}
-			measurements[station] = s
+			measurements[h] = s
 		} else {
 			if measure > s.Max {
 				s.Max = measure
@@ -72,24 +95,25 @@ func run(_ []string) error {
 				s.Min = measure
 			}
 			s.Sum += measure
+			s.Count++
 		}
 
 		s.Measures = append(s.Measures, measure)
-		if i%1_000_000 == 0 {
-			fmt.Printf("at %d.\n", i)
-		}
+		// if i%1_000_000 == 0 {
+		// 	fmt.Printf("at %d.\n", i)
+		// }
 		i++
 	}
 
 	mslice := slices.Collect(maps.Values(measurements))
 	stationCount := len(mslice)
 	slices.SortFunc(mslice, func(a, b *Station) int {
-		return strings.Compare(a.Name, b.Name)
+		return bytes.Compare(a.Name, b.Name)
 	})
 
 	fmt.Printf("{")
 	for i, station := range mslice {
-		station.Avg = (float32(station.Sum) / float32(10)) / float32(len(station.Measures))
+		station.Avg = (float32(station.Sum) / 10) / float32(station.Count)
 
 		fmt.Printf("%s=%.1f/%.1f/%.1f", station.Name, float32(station.Min)/10, station.Avg, float32(station.Max)/10)
 
@@ -104,12 +128,13 @@ func run(_ []string) error {
 }
 
 type Station struct {
-	Name     string
+	Name     []byte
 	Measures []int32
 	Avg      float32
 	Min      int32
 	Max      int32
 	Sum      int32
+	Count    uint32
 }
 
 func tenToThePowerOf(n uint32) uint32 {
@@ -141,4 +166,18 @@ func fastFloatParse(b []byte) int32 {
 
 	measure *= sign
 	return measure
+}
+
+const (
+	offset64 = 14695981039346656037
+	prime64  = 1099511628211
+)
+
+func hash(b []byte) uint64 {
+	var h uint64 = offset64
+	for _, c := range b {
+		h *= prime64
+		h ^= uint64(c)
+	}
+	return h
 }
