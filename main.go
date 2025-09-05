@@ -8,7 +8,6 @@ import (
 	"os"
 	"runtime/pprof"
 	"slices"
-	"strconv"
 	"strings"
 )
 
@@ -39,7 +38,9 @@ func run(_ []string) error {
 
 	defer fd.Close()
 
-	s := bufio.NewScanner(bufio.NewReaderSize(fd, 256*1024*1024))
+	s := bufio.NewScanner(fd)
+	buf := make([]byte, 256*1024*1024)
+	s.Buffer(buf, 1024)
 
 	measurements := make(map[string]*Station, 1024)
 
@@ -49,18 +50,15 @@ func run(_ []string) error {
 		sep := bytes.IndexByte(l, ';')
 
 		station := string(l[:sep])
-		rawMeasure := string(l[sep+1:])
-		parsed, err := strconv.ParseFloat(rawMeasure, 32)
-		if err != nil {
-			return fmt.Errorf("could not parse %s to float: %w", rawMeasure, err)
-		}
-		measure := float32(parsed)
+		rawMeasure := l[sep+1:]
+
+		measure := fastFloatParse(rawMeasure)
 
 		s, ok := measurements[station]
 		if !ok {
 			s = &Station{
 				Name:     station,
-				Measures: make([]float32, 0, 8192),
+				Measures: make([]int32, 0, 8192),
 				Max:      measure,
 				Min:      measure,
 				Sum:      measure,
@@ -91,9 +89,9 @@ func run(_ []string) error {
 
 	fmt.Printf("{")
 	for i, station := range mslice {
-		station.Avg = station.Sum / float32(len(station.Measures))
+		station.Avg = (float32(station.Sum) / float32(10)) / float32(len(station.Measures))
 
-		fmt.Printf("%s=%.1f/%.1f/%.1f", station.Name, station.Min, station.Avg, station.Max)
+		fmt.Printf("%s=%.1f/%.1f/%.1f", station.Name, float32(station.Min)/10, station.Avg, float32(station.Max)/10)
 
 		i++
 		if i < stationCount {
@@ -107,9 +105,40 @@ func run(_ []string) error {
 
 type Station struct {
 	Name     string
-	Measures []float32
+	Measures []int32
 	Avg      float32
-	Min      float32
-	Max      float32
-	Sum      float32
+	Min      int32
+	Max      int32
+	Sum      int32
+}
+
+func tenToThePowerOf(n uint32) uint32 {
+	var r uint32 = 1
+	for range n {
+		r *= 10
+	}
+
+	return r
+}
+
+func fastFloatParse(b []byte) int32 {
+	var sign int32 = 1
+	if len(b) > 0 && b[0] == '-' {
+		sign = -1
+
+		b = b[1:]
+	}
+
+	var measure int32 = 0
+	var power uint32 = 0
+	for i := int32(len(b) - 1); i >= 0; i-- {
+		b := b[i]
+		if b >= '0' && b <= '9' {
+			measure += (int32(b) - int32('0')) * int32(tenToThePowerOf(power))
+			power++
+		}
+	}
+
+	measure *= sign
+	return measure
 }
