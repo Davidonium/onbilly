@@ -27,3 +27,22 @@ The task is to write a Go program which reads the file, calculates the min, mean
 ```
 {Abha=-23.0/18.0/59.2, Abidjan=-16.2/26.0/67.3, Abéché=-10.0/29.4/69.0, Accra=-10.1/26.4/66.4, Addis Ababa=-23.7/16.0/67.0, Adelaide=-27.8/17.3/58.5, ...}
 ```
+
+## Build & Run
+
+```shell
+$ go build -o build/onebilly ./main.go && ./build/onebilly
+```
+
+
+## Profiling
+
+To understand where the performance bottlenecks are, a pprof file is generated at `./var/cpu.pprof`.
+
+To spawn an http server to inspect it run:
+
+```shell
+$ go tool pprof -http=:7777 ./var/cpu.pprof
+```
+
+Then go to `http://localhost:7777`.

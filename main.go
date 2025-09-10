@@ -137,7 +137,6 @@ func run(_ []string) error {
 	buf := make([]byte, bufCap)
 	s.Buffer(buf, bufCap)
 
-
 	for {
 		chunk := chunkPool.Get().(*Chunk)
 		chunk.Lines = chunk.Lines[:0]
