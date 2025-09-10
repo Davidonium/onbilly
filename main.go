@@ -6,8 +6,14 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"runtime"
 	"runtime/pprof"
 	"slices"
+	"sync"
+)
+
+const (
+	chunkSize = 1000
 )
 
 func main() {
@@ -37,55 +43,129 @@ func run(_ []string) error {
 
 	defer fd.Close()
 
-	s := bufio.NewScanner(fd)
-	// 256 MiB buffer
-	buf := make([]byte, 256*1024*1024)
-	s.Buffer(buf, 256*1024*1024)
-
-	measurements := make(map[uint64]*Station, 512)
-
-	i := 0
-	for s.Scan() {
-		l := s.Bytes()
-		sepidx := bytes.IndexByte(l, ';')
-
-		station := l[:sepidx]
-		rawMeasure := l[sepidx+1:]
-
-		measure := fastFloatParse(rawMeasure)
-
-		h := hash(station)
-		s, ok := measurements[h]
-		if !ok {
-			stationCopy := make([]byte, len(station))
-			copy(stationCopy, station)
-			s = &Station{
-				Name:     stationCopy,
-				Measures: make([]int32, 0, 20*1024),
-				Max:      measure,
-				Min:      measure,
-				Sum:      measure,
+	chunkPool := &sync.Pool{
+		New: func() any {
+			return &Chunk{
+				Lines: make([][]byte, 0, chunkSize),
 			}
-			measurements[h] = s
-		} else {
-			if measure > s.Max {
-				s.Max = measure
-			}
-			if measure < s.Min {
-				s.Min = measure
-			}
-			s.Sum += measure
-			s.Count++
-		}
-
-		s.Measures = append(s.Measures, measure)
-		// if i%1_000_000 == 0 {
-		// 	fmt.Printf("at %d.\n", i)
-		// }
-		i++
+		},
 	}
 
-	mslice := slices.Collect(maps.Values(measurements))
+	chunkCh := make(chan *Chunk, runtime.NumCPU())
+	resultsCh := make(chan map[uint64]*Station)
+	finalCh := make(chan map[uint64]*Station)
+
+	var wg sync.WaitGroup
+	for cpun := range runtime.NumCPU() {
+		wg.Add(1)
+		go func(chunkCh <-chan *Chunk, resultsCh chan<- map[uint64]*Station) {
+			defer wg.Done()
+			measurements := make(map[uint64]*Station, 128)
+			i := 0
+			for ch := range chunkCh {
+				for _, l := range ch.Lines {
+					if i%1_000_000 == 0 {
+						fmt.Printf("cpu#%d - i=%d\n", cpun, i)
+					}
+					i++
+
+					sepidx := bytes.IndexByte(l, ';')
+
+					stationNameBytes := l[:sepidx]
+					rawMeasure := l[sepidx+1:]
+
+					h := hash(stationNameBytes)
+					measure := fastFloatParse(rawMeasure)
+
+					s, ok := measurements[h]
+					if !ok {
+						s = &Station{
+							Name:  stationNameBytes,
+							Max:   measure,
+							Min:   measure,
+							Sum:   measure,
+							Count: 1,
+						}
+						measurements[h] = s
+					} else {
+						if measure > s.Max {
+							s.Max = measure
+						}
+						if measure < s.Min {
+							s.Min = measure
+						}
+						s.Sum += measure
+						s.Count++
+					}
+				}
+
+				ch.Lines = ch.Lines[:0]
+				chunkPool.Put(ch)
+			}
+			fmt.Println("writing measurements")
+			resultsCh <- measurements
+			fmt.Println("measurements written")
+
+		}(chunkCh, resultsCh)
+	}
+
+	go func() {
+		combined := make(map[uint64]*Station, 512)
+		for r := range resultsCh {
+			for k, s := range r {
+				if cs, ok := combined[k]; ok {
+					cs.Sum += s.Sum
+					cs.Count += s.Count
+					if s.Min < cs.Min {
+						cs.Min = s.Min
+					}
+					if s.Max > cs.Max {
+						cs.Max = s.Max
+					}
+				} else {
+					combined[k] = s
+				}
+			}
+		}
+		finalCh <- combined
+	}()
+
+	s := bufio.NewScanner(fd)
+	// 256 MiB buffer
+	bufCap := 256 * 1024 * 1024
+	// set the max token size same as the buffer capacity to avoid reallocations
+	buf := make([]byte, bufCap)
+	s.Buffer(buf, bufCap)
+
+
+	for {
+		chunk := chunkPool.Get().(*Chunk)
+		chunk.Lines = chunk.Lines[:0]
+		for len(chunk.Lines) < chunkSize && s.Scan() {
+			l := s.Bytes()
+			line := make([]byte, len(l))
+			copy(line, l)
+			chunk.Lines = append(chunk.Lines, line)
+		}
+
+		// if no lines were scanned, that means the input has been totally consumed
+		if len(chunk.Lines) == 0 {
+			chunk.Lines = chunk.Lines[:0]
+			chunkPool.Put(chunk)
+			break
+		}
+
+		chunkCh <- chunk
+	}
+
+	close(chunkCh)
+
+	fmt.Println("waiting for goroutines to finish")
+	wg.Wait()
+	close(resultsCh)
+	combined := <-finalCh
+
+	mslice := slices.Collect(maps.Values(combined))
 	stationCount := len(mslice)
 	slices.SortFunc(mslice, func(a, b *Station) int {
 		return bytes.Compare(a.Name, b.Name)
@@ -108,13 +188,12 @@ func run(_ []string) error {
 }
 
 type Station struct {
-	Name     []byte
-	Measures []int32
-	Avg      float32
-	Min      int32
-	Max      int32
-	Sum      int32
-	Count    uint32
+	Name  []byte
+	Avg   float32
+	Min   int32
+	Max   int32
+	Sum   int32
+	Count uint32
 }
 
 func tenToThePowerOf(n uint32) uint32 {
@@ -122,7 +201,6 @@ func tenToThePowerOf(n uint32) uint32 {
 	for range n {
 		r *= 10
 	}
-
 	return r
 }
 
@@ -160,4 +238,12 @@ func hash(b []byte) uint64 {
 		h ^= uint64(c)
 	}
 	return h
+}
+
+type Chunk struct {
+	Lines [][]byte
+}
+
+type Line struct {
+	Bytes []byte
 }
